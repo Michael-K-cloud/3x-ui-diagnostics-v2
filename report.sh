@@ -1,6 +1,11 @@
 #!/bin/bash
-# Единый генератор отчётов (версия 3.1, 26.09.2026).
+# Единый генератор отчётов (версия 3.3, 27.09.2026).
+# v3.3: отчёты эталона через baseline.sh v2.0 (--public: секреты в HTML/Telegram
+#       маскируются; сравнение — unified diff).
 # ПРИНЦИП: ОДИН текст для терминала и HTML (идентичность гарантирована).
+# v3.2: подпись «clients on-line» без слов «(уникальных внешних IP)» — по заданию
+# владельца 26.09 (смысл прежний: уникальные внешние IP с established-соединением
+# к портам xray; подробности — в комментарии у online_clients()).
 #
 # Использование:
 #   bash report.sh {status|wal|etalon|fail2ban|logs} [часы]         — создать HTML, напечатать ссылку
@@ -123,7 +128,7 @@ gen_status_text() {
    $DBTXT
    📊 inbounds: $(q "SELECT COUNT(*) FROM inbounds;")
    👤 clients: $(q "SELECT COUNT(*) FROM clients;")
-   👥 clients on-line (уникальных внешних IP): $ONLINE
+   👥 clients on-line: $ONLINE
    ⛓️ client_inbounds: $(q "SELECT COUNT(*) FROM client_inbounds;")
    🔗 nodes: $(q "SELECT COUNT(*) FROM nodes;")
    ⛔️ limit_ip>0: $(q "SELECT COUNT(*) FROM clients WHERE limit_ip>0;")
@@ -224,16 +229,17 @@ gen_etalon_text() {
     echo "⚠️ Эталон ещё не сохранён (menu → Диагностика → Эталон сервера → Сохранить)."
     echo ""
     echo "=== Текущий снапшот ==="
-    bash "$DIR/baseline.sh" now
+    bash "$DIR/baseline.sh" now --public
     return
   fi
   echo "Эталон: $(head -1 "$DIR/etalon/etalon.txt" | sed 's/^# Снимок: //')"
+  echo "(в отчёте секреты замаскированы; полный снимок — на сервере, /root/scripts/etalon/)"
   echo ""
-  bash "$DIR/baseline.sh" compare 2>&1 | strip_ansi
+  bash "$DIR/baseline.sh" compare --public 2>&1 | strip_ansi
 }
 gen_etalon_tg() {
   if [ ! -f "$DIR/etalon/etalon.txt" ]; then echo "📌 Эталон ещё не сохранён."; return; fi
-  local n; n=$(bash "$DIR/baseline.sh" compare 2>&1 | grep -cE '^[<>]')
+  local n; n=$(bash "$DIR/baseline.sh" compare --public 2>&1 | grep -vE '^(\+\+\+|---)' | grep -cE '^[+-]')
   echo "📌 Эталон — сервер $HOSTS ($(head -1 "$DIR/etalon/etalon.txt" | sed 's/^# Снимок: //'))"
   if [ "$n" = "0" ]; then echo "✅ Отличий от эталона нет"; else echo "⚠️ Отличий от эталона: $n строк"; fi
 }

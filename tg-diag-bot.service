@@ -1,6 +1,6 @@
 [Unit]
 Description=Telegram diagnostics bot (3x-ui-diagnostics)
-Documentation=https://github.com/Michael-K-cloud/3x-ui-diagnostics
+Documentation=https://github.com/Michael-K-cloud/3x-ui-diagnostics-v2
 After=network-online.target
 Wants=network-online.target
 

@@ -1,13 +1,18 @@
 #!/bin/bash
 # Установка/обновление системы диагностики сервера 3x-ui-diagnostics.
-# Версия 2.5 (26.09.2026)
+# Версия 2.7 (27.09.2026)
+# Новое в 2.7: репозиторий ПЕРЕИМЕНОВАН — комплект v3.3 живёт в Michael-K-cloud/
+#   3x-ui-diagnostics-v2 (старый 3x-ui-diagnostics возвращается к исходному
+#   состоянию 25.08.2026 по решению владельца). Все URL установки — на -v2.
 #
 # Способ 1 (основной): запуск из распакованного архива/папки репозитория — без сети.
 # Способ 2: скачивание ВСЕГО репозитория одним tar-архивом с codeload.github.com (IPv4).
 # Пофайловое скачивание с raw.githubusercontent.com НЕ используется (нестабильные IP Fastly).
 #
+# Новое в 2.6 (задание владельца 26.09: «оставь спиннер и добавь проценты»):
+#  - спиннер [|/-\] СОХРАНЁН, рядом с ним — процент общего прогресса установки:
+#    «[|]  35% — Скачивание репозитория...»; шаги: 15/35/55/70/85/100%.
 # Новое в 2.5:
-#  - анимация процесса установки (спиннер) вместо «мёртвой тишины»;
 #  - установщик СПРАШИВАЕТ: ставить ли Telegram-бота (1-да/2-нет);
 #    если да — пошагово запрашивает BOT_TOKEN (с инструкцией и проверкой через getMe)
 #    и CHAT_ID (с инструкцией про @myidbot), пишет /root/scripts/.env и ставит бота;
@@ -18,16 +23,17 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-DIAG_VERSION="2.5"
+DIAG_VERSION="2.7"
 FILES="main.sh logs.sh system_report.sh fail2ban.sh wal-watch.sh baseline.sh report.sh backup.sh ext-check.sh tg-bot.py tg-bot-install.sh tg-diag-bot.service"
 GITHUB_USER="Michael-K-cloud"
-GITHUB_REPO="3x-ui-diagnostics"
+GITHUB_REPO="3x-ui-diagnostics-v2"
 BRANCH="main"
 TARBALL_URL="https://codeload.github.com/${GITHUB_USER}/${GITHUB_REPO}/tar.gz/refs/heads/${BRANCH}"
 
 SPIN_PID=""
-spin_start() {
-  ( s='|/-\'; i=0; while :; do printf "\r  ${YELLOW}[%s]${NC} %s" "${s:i++%${#s}:1}" "$1"; sleep 0.15; done ) &
+STEP_PCT=0
+spin_start() {   # $1 = текст; процент берётся из STEP_PCT (ставить ДО вызова)
+  ( s='|/-\'; i=0; while :; do printf "\r  ${YELLOW}[%s]${NC} %3d%% — %s" "${s:i++%${#s}:1}" "$STEP_PCT" "$1"; sleep 0.15; done ) &
   SPIN_PID=$!
 }
 spin_stop() {
@@ -49,6 +55,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # 2. Зависимости (со спиннером)
+STEP_PCT=15
 spin_start "Установка зависимостей (sqlite3, sysstat)..."
 ( apt update -qq && apt install sqlite3 sysstat -y -qq ) >/dev/null 2>&1
 APT_OK=$?
@@ -75,6 +82,7 @@ if [ -n "$SRC_DIR" ]; then
 fi
 
 if [ -z "$SRC" ]; then
+  STEP_PCT=35
   spin_start "Скачивание репозитория одним архивом (codeload.github.com, IPv4)..."
   TMPD=$(mktemp -d)
   wget --inet4-only --timeout=30 --tries=3 -qO "$TMPD/repo.tar.gz" "$TARBALL_URL"
@@ -101,6 +109,7 @@ if [ -z "$SRC" ]; then
 fi
 
 # 5. Копирование (только после проверки источника)
+STEP_PCT=55
 spin_start "Копирование файлов в /root/scripts..."
 for f in $FILES; do cp -f "$SRC/$f" "/root/scripts/$f"; done
 spin_stop
@@ -117,7 +126,7 @@ if [ "$FAIL" = "1" ]; then
   echo -e "${RED}❌ Установка прервана: повторите установку.${NC}"
   exit 1
 fi
-echo -e "  ${GREEN}✅ Все файлы установлены и проверены${NC}"
+echo -e "  ${GREEN}✅ 70% — все файлы установлены и проверены${NC}"
 
 # 7. Права и команда menu
 chmod +x /root/scripts/*.sh
@@ -132,7 +141,7 @@ fi
 
 echo ""
 if [ "$BOT_CONFIGURED" = "1" ]; then
-  echo -e "${GREEN}🤖 Telegram-бот уже настроен (.env заполнен) — обновляю и перезапускаю...${NC}"
+  echo -e "${GREEN}🤖 85% — Telegram-бот уже настроен (.env заполнен): обновляю и перезапускаю...${NC}"
   bash /root/scripts/tg-bot-install.sh
 else
   echo "🤖 Установить Telegram БОТа?"
@@ -184,6 +193,7 @@ else
         rm -f "$ENVF.tmp"
         chmod 600 "$ENVF"
         echo -e "  ${GREEN}✅ .env заполнен${NC}"
+        echo -e "${GREEN}🤖 85% — устанавливаю и запускаю Telegram-бота...${NC}"
         bash /root/scripts/tg-bot-install.sh
       else
         echo -e "${RED}❌ CHAT_ID должен быть числом. Допишите его вручную в $ENVF (строка CHAT_ID=...)${NC}"
@@ -198,7 +208,7 @@ fi
 
 echo ""
 echo -e "${GREEN}==========================================${NC}"
-echo -e "${GREEN}  ✅ Установка успешно завершена!${NC}"
+echo -e "${GREEN}  ✅ 100% — Установка успешно завершена!${NC}"
 echo -e "${GREEN}==========================================${NC}"
 echo ""
 echo "Контрольные суммы установленных файлов:"

@@ -267,42 +267,42 @@ menu_etalon() {
   while true; do
     clear
     echo -e "${PINK}==========================================${NC}"
-    echo -e "${PINK}  ЭТАЛОН СЕРВЕРА (опорное состояние)${NC}"
+    echo -e "${PINK}  ЭТАЛОН СЕРВЕРА (версионные снапшоты)${NC}"
     echo -e "${PINK}==========================================${NC}"
     echo ""
-    if [ -f "$DIR/etalon/etalon.txt" ]; then
-      echo -e "Сохранённый эталон: ${GREEN}$(head -1 "$DIR/etalon/etalon.txt")${NC}"
+    LAST=$(bash $DIR/baseline.sh latest 2>/dev/null)
+    if [ -n "$LAST" ]; then
+      CNT=$(ls -1 "$DIR"/etalon/etalon-*.txt 2>/dev/null | wc -l)
+      echo -e "Последний эталон: ${GREEN}$LAST${NC} (всего в истории: $CNT)"
     else
-      echo -e "Сохранённый эталон: ${YELLOW}нет${NC}"
+      echo -e "Сохранённых эталонов: ${YELLOW}нет${NC}"
     fi
     echo ""
-    echo -e "  ${GREEN}1.${NC} 📄 Показать сохранённый эталон"
-    echo -e "  ${GREEN}2.${NC} 💾 Сохранить текущее состояние как эталон"
-    echo -e "  ${GREEN}3.${NC} 🔍 Сравнить текущее состояние с эталоном"
-    echo -e "  ${GREEN}4.${NC} 📊 Показать текущий снапшот (без сохранения)"
-    echo -e "  ${GREEN}5.${NC} 🌐 HTML-отчёт: сравнение с эталоном (ссылка)"
+    echo -e "  ${GREEN}1.${NC} 📄 Показать последний эталон"
+    echo -e "  ${GREEN}2.${NC} 💾 Создать новый эталон (старые НЕ перезаписываются)"
+    echo -e "  ${GREEN}3.${NC} 📚 Список всех эталонов (история)"
+    echo -e "  ${GREEN}4.${NC} 🔍 Сравнить текущее состояние с последним эталоном"
+    echo -e "  ${GREEN}5.${NC} ⚖️ Сравнить два эталона между собой (по номерам)"
+    echo -e "  ${GREEN}6.${NC} 📊 Показать текущий снапшот (без сохранения)"
+    echo -e "  ${GREEN}7.${NC} 🌐 HTML-отчёт: сравнение с эталоном (ссылка)"
     echo -e "  ${GREEN}0.${NC} ← Назад (или Enter)"
     echo ""
     read -p "  Ваш выбор: " c
     case $c in
       1) echo ""; bash $DIR/baseline.sh show; pause;;
-      2)
+      2) echo ""; bash $DIR/baseline.sh save; pause;;
+      3) echo ""; bash $DIR/baseline.sh list; pause;;
+      4) echo ""; bash $DIR/baseline.sh compare; pause;;
+      5)
         echo ""
-        if [ -f "$DIR/etalon/etalon.txt" ]; then
-          echo -e "${YELLOW}⚠️ Эталон уже сохранён: $(head -1 "$DIR/etalon/etalon.txt")${NC}"
-          read -p "Перезаписать его текущим состоянием? (yes/no): " ans
-          if [ "$ans" = "yes" ]; then
-            bash $DIR/baseline.sh save
-          else
-            echo "Отменено — эталон не изменён"
-          fi
-        else
-          bash $DIR/baseline.sh save
-        fi
+        bash $DIR/baseline.sh list
+        echo ""
+        read -p "  Номер ПЕРВОГО эталона (A): " na
+        read -p "  Номер ВТОРОГО эталона (B): " nb
+        [ -n "$na" ] && [ -n "$nb" ] && { echo ""; bash $DIR/baseline.sh compare "$na" "$nb"; }
         pause;;
-      3) echo ""; bash $DIR/baseline.sh compare; pause;;
-      4) echo ""; bash $DIR/baseline.sh now; pause;;
-      5) echo ""; bash $DIR/report.sh etalon; pause;;
+      6) echo ""; bash $DIR/baseline.sh now; pause;;
+      7) echo ""; bash $DIR/report.sh etalon; pause;;
       0|""|" ") return;;
     esac
   done
@@ -350,7 +350,7 @@ menu_diag() {
     echo -e "  ${GREEN}1.${NC} 📊 Отчет о состоянии сервера (статус панели, БД, CPU, память, диск, ошибки)"
     echo -e "  ${GREEN}2.${NC} 🛡 WAL-сторож (контроль базы x-ui каждые 5 минут: статус, лог, вкл/выкл)"
     echo -e "  ${GREEN}3.${NC} 📈 htop (диспетчер задач)"
-    echo -e "  ${GREEN}4.${NC} 📌 Эталон сервера (сохранить / сравнить опорное состояние)"
+    echo -e "  ${GREEN}4.${NC} 📌 Эталон сервера (версионные снапшоты: создать / список / сравнить)"
     echo -e "  ${GREEN}5.${NC} 🌐 HTML-отчёты (создать страницу и получить ссылку)"
     echo -e "  ${GREEN}6.${NC} 🌍 Внешняя проверка инбаундов (check-host.net: доступен ли порт извне / не блокирует ли провайдер)"
     echo -e "  ${GREEN}0.${NC} ← Назад (или Enter)"
@@ -369,11 +369,7 @@ menu_diag() {
         fi;;
       4) menu_etalon;;
       5) menu_report;;
-      6)
-        echo ""
-        read -p "  Порт для проверки (Enter = все порты инбаундов + 443): " eport
-        bash $DIR/ext-check.sh $eport
-        pause;;
+      6) bash $DIR/ext-check.sh; pause;;
       0|""|" ") return;;
     esac
   done

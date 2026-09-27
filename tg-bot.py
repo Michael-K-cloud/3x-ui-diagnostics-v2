@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-tg-bot.py — Telegram-бот диагностики сервера 3x-ui (версия 0.2.1, 26.09.2026).
+tg-bot.py — Telegram-бот диагностики сервера 3x-ui (версия 0.3.1, 27.09.2026).
 
 ОДИН сервер = ОДИН запущенный бот (Telegram не позволяет нескольким процессам
-слушать один токен). Мульти-серверная версия (выбор сервера, общий отчёт) — v0.3.
+слушать один токен). Мульти-серверная версия (выбор сервера, общий отчёт) — v0.4.
 
 Только стандартная библиотека python3 (без pip). Настройки: /root/scripts/.env
 (BOT_TOKEN, CHAT_ID, REPORT_INTERVAL_HOURS, SERVER_NAME, TG_ENABLED).
@@ -12,12 +12,24 @@ tg-bot.py — Telegram-бот диагностики сервера 3x-ui (ве�
 v0.2: отчёты через report.sh --tg (единый источник «терминал = HTML = Telegram»);
 сообщение-заглушка «⏳ Готовлю отчёт...» РЕДАКТИРУЕТСЯ в готовый отчёт;
 бэкапы: кнопка «📦 Бэкап сейчас» + автоматическая утренняя отправка файла (09:05 МСК);
-внешняя проверка инбаундов через check-host.net (кнопка «🌍»);
 ежедневное «жив» в 09:00 МСК; алерты WAL-сторожа только при смене состояния.
-v0.2.1: исправлена внешняя проверка — check-host.net возвращает "request_id"
-(код искал "check_id" и падал с RuntimeError); вердикты узлов разбираются
-устойчиво (1/"Connected" = доступен, текст ошибки = недоступен), названия
-стран берутся из карты узлов ответа.
+v0.3 (26.09): внешняя проверка ПЕРЕДЕЛАНА по заданию владельца:
+- ОДНА кнопка «🌍 Внешняя проверка» — проверяет ВСЁ СРАЗУ (Nginx 443 + все
+  инбаунды), а не по одному порту;
+- код check-host.net из бота УБРАН: проверку делает ext-check.sh all --tg
+  (единый источник «терминал = HTML = Telegram», как report.sh);
+- исправлена причина «HTTPError 404»: правильный адрес API —
+  https://check-host.net/check-result/<request_id> (единственное число;
+  «check-results» не существует);
+- заглушка «⏳» каждые ~12 с обновляется прогрессом (проценты, этап) — видно,
+  что бот жив;
+- итог в Telegram: «🌍 Внешняя проверка доступности инбаундов:» + строки
+  «Название: ✅/❌/⚠️» + ссылка «🌐 Полный отчёт» (HTML со странами и причинами).
+v0.3.1 (27.09): эталон ВЕРСИОННЫЙ (baseline.sh v2.0, задание владельца):
+- «💾 Создать новый эталон» — каждый раз НОВЫЙ файл с датой/временем, старые
+  НЕ перезаписываются (подтверждение «yes» больше не нужно);
+- новая кнопка «📚 Список эталонов» — история снимков;
+- сравнение текущего состояния с последним эталоном — как раньше (r:etalon).
 
 Безопасность: обновления принимаются ТОЛЬКО от CHAT_ID из .env; деструктивные
 действия — после подтверждения («yes» или кнопка). Токен не покидает сервер.
@@ -29,7 +41,6 @@ import re
 import subprocess
 import sys
 import time
-import urllib.parse
 import urllib.request
 
 ENVF = "/root/scripts/.env"
@@ -176,11 +187,6 @@ BACK_HOME = (btn("⬅️ Назад", "m:diag"), btn("🏠 Главное мен
 BACK_MAIN = (btn("🏠 Главное меню", "m:home"),)
 
 
-def panel_domain():
-    d = sh("sqlite3 'file:/etc/x-ui/x-ui.db?mode=ro&immutable=1' \"SELECT value FROM settings WHERE key='webDomain';\"")
-    return d.strip() or sh("hostname -f")
-
-
 def resources_text():
     cpu = sh("top -bn1 | grep '%Cpu' | awk '{print 100-$8}' | cut -d. -f1") or "?"
     ram = sh("free -m | awk '/Mem:/ {printf \"%d%% (занято %d MB из %d MB, свободно %d MB)\", $3*100/$2, $3, $2, $7}'")
@@ -233,89 +239,60 @@ def do_backup(daily=False):
         send(text, kbd(BACK_HOME))
 
 
-def ch_api(url, data=None):
-    req = urllib.request.Request(url, data=data,
-                                 headers={"Accept": "application/json", "User-Agent": "tg-diag-bot/0.2.1"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.loads(r.read().decode("utf-8"))
+EXT_PROGRESS = "/tmp/.tg-ext-check-progress"
 
 
-def ch_verdict(arr):
-    """Вердикт по ответу узла check-host: 'ok' | 'bad' | 'pending' (+ детали).
-    Формат узла: [[1, 0.05, 'ip:port']] — успех; [['Connection timed out']] — отказ;
-    [null] — ещё не готово."""
-    if not isinstance(arr, list) or not arr:
-        return "pending", ""
-    for n in arr:
-        if n is None:
-            return "pending", ""
-        if not isinstance(n, list) or not n:
-            continue
-        v = n[0]
-        if v is None:
-            return "pending", ""
-        if v is True or v == 1 or str(v).strip() in ("1", "Connected", "connected", "OK"):
-            return "ok", ""
-        s = str(v).strip()
-        if s:
-            return "bad", s[:45]
-    return "pending", ""
-
-
-def do_external_check(port):
-    dom = panel_domain()
-    target = "%s:%s" % (dom, port)
-    m = send("🌍 Внешняя проверка %s через check-host.net (до 2 минут)..." % target)
+def do_external_check_all():
+    """Внешняя проверка ВСЕХ инбаундов сразу — делает ext-check.sh all --tg
+    (единый источник «терминал = HTML = Telegram»). Заглушка редактируется
+    в готовую сводку; по пути каждые ~12 с показываем прогресс (проценты)."""
+    m = send("🌍 Внешняя проверка доступности инбаундов\n⏳ Проверяю всё сразу из разных стран (обычно 30–90 с)...")
     mid = (m.get("result") or {}).get("message_id")
     try:
-        data = urllib.parse.urlencode({"host": target, "max_nodes": "16"}).encode()
-        r = ch_api("https://check-host.net/check-tcp", data)
-        # ВАЖНО: check-host возвращает "request_id" (не "check_id"!)
-        cid = r.get("request_id") or r.get("check_id")
-        link = r.get("permanent_link", "")
-        nodes = r.get("nodes") or {}   # node_id -> [cc, страна, город, ip, AS]
-        if not cid:
-            raise RuntimeError("check-host не вернул request_id")
-        res = None
-        for _ in range(30):
-            time.sleep(4)
-            res = ch_api("https://check-host.net/check-results/%s?json=1" % cid)
-            if isinstance(res, dict) and res:
-                if all(ch_verdict(arr)[0] != "pending" for arr in res.values()):
-                    break
-        bycountry = {}
-        if isinstance(res, dict):
-            for nid, arr in res.items():
-                meta = nodes.get(nid) or ["?", "?", "?"]
-                country = meta[1] or (meta[0] or "?")
-                st, detail = ch_verdict(arr)
-                d = bycountry.setdefault(country, [0, 0, ""])
-                if st == "ok":
-                    d[0] += 1
-                elif st == "bad":
-                    d[1] += 1
-                    if not d[2]:
-                        d[2] = detail
-                else:
-                    d[1] += 0   # нет ответа узла — не считаем ни туда, ни сюда
-        okc = sum(v[0] for v in bycountry.values())
-        badc = sum(v[1] for v in bycountry.values())
-        lines = []
-        for country in sorted(bycountry):
-            cok, cbad, detail = bycountry[country]
-            mark = "✅" if cok and not cbad else ("❌" if cbad and not cok else "⚠️")
-            extra = (" (%s)" % detail) if cbad and detail else ""
-            lines.append("%s %s: доступно %d / недоступно %d%s" % (mark, country, cok, cbad, extra))
-        text = ("🌍 Внешняя проверка %s\nУзлов: %d · доступно: %d · недоступно: %d\n\n%s\n\nПодробно: %s"
-                % (target, okc + badc, okc, badc, "\n".join(lines[:25]) or "(нет данных)", link))
+        os.remove(EXT_PROGRESS)
+    except OSError:
+        pass
+    env = dict(os.environ, EXTCHECK_PROGRESS=EXT_PROGRESS)
+    text = ""
+    try:
+        p = subprocess.Popen(["bash", SCRIPTS + "/ext-check.sh", "all", "--tg"],
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             text=True, env=env)
+        deadline = time.time() + 280
+        last_edit = time.time()
+        last_line = ""
+        while p.poll() is None:
+            time.sleep(3)
+            if time.time() > deadline:
+                p.kill()
+                text = "❌ Внешняя проверка не завершилась за 280 с — прервана.\nПовторите кнопку «🌍» позже."
+                break
+            if mid and time.time() - last_edit >= 12:
+                try:
+                    with open(EXT_PROGRESS, encoding="utf-8") as f:
+                        lines = [l for l in f.read().splitlines() if "|" in l]
+                    if lines:
+                        pct, _, what = lines[-1].partition("|")
+                        line = "⏳ %s%% — %s" % (pct.strip(), what.strip())
+                        if line != last_line:
+                            last_line = line
+                            edit("🌍 Внешняя проверка доступности инбаундов\n%s" % line, mid)
+                            last_edit = time.time()
+                except Exception:
+                    pass
+        if not text:
+            text = (p.stdout.read() or "").strip()
     except Exception as e:
         text = "❌ Внешняя проверка не удалась: %r" % e
+    if not text:
+        text = ("❌ ext-check.sh вернул пусто. Выполните в терминале: "
+                "bash %s/ext-check.sh all" % SCRIPTS)
     if mid:
-        r2 = edit(text, mid, kbd((btn("🌍 Другой порт", "m:check"),), BACK_HOME))
-        if not r2.get("ok"):
-            send(text)
+        r = edit(text, mid, kbd((btn("🌍 Проверить ещё раз", "xc:all"),), BACK_HOME))
+        if not r.get("ok"):
+            send(text, kbd(BACK_HOME))
     else:
-        send(text)
+        send(text, kbd(BACK_HOME))
 
 
 def wal_state():
@@ -350,7 +327,7 @@ def kb_diag():
         (btn("📊 Отчёт о состоянии", "r:status"), btn("🛡 WAL-сторож", "m:wal")),
         (btn("📈 Ресурсы (CPU/RAM/диск)", "r:res"), btn("📌 Эталон", "m:etalon")),
         (btn("🛡 fail2ban", "r:f2b"), btn("📋 Логи", "m:logs")),
-        (btn("📦 Бэкап сейчас", "bk:now"), btn("🌍 Внешняя проверка", "m:check")),
+        (btn("📦 Бэкап сейчас", "bk:now"), btn("🌍 Внешняя проверка", "xc:all")),
         BACK_MAIN,
     )
 
@@ -366,7 +343,8 @@ def kb_wal():
 def kb_etalon():
     return kbd(
         (btn("🔍 Сравнить с эталоном", "r:etalon"),),
-        (btn("💾 Сохранить текущее как эталон", "et:save"),),
+        (btn("💾 Создать новый эталон", "et:save"),),
+        (btn("📚 Список эталонов", "et:list"),),
         BACK_HOME,
     )
 
@@ -400,22 +378,6 @@ def kb_res():
     return kbd(
         (btn("🔄 Обновить", "res:upd"), btn("⬅️ Назад", "m:diag"), btn("🏠 Главное меню", "m:home")),
     )
-
-
-def kb_check():
-    rows = []
-    out = sh("sqlite3 'file:/etc/x-ui/x-ui.db?mode=ro&immutable=1' \"SELECT remark||' :'||port FROM inbounds WHERE enable=1 AND port>0 ORDER BY id;\"")
-    ports = sh("sqlite3 'file:/etc/x-ui/x-ui.db?mode=ro&immutable=1' \"SELECT port FROM inbounds WHERE enable=1 AND port>0 ORDER BY id;\"").split()
-    labels = out.splitlines()
-    pair_rows = []
-    items = [("🌐 nginx :443", "443")]
-    for i, p in enumerate(ports):
-        lbl = labels[i] if i < len(labels) else ("порт %s" % p)
-        items.append((lbl[:28], p))
-    for i in range(0, len(items), 2):
-        chunk = items[i:i + 2]
-        pair_rows.append(tuple(btn(lbl, "xc:%s" % p) for lbl, p in chunk))
-    return kbd(*pair_rows, (btn("⬅️ Назад", "m:diag"), btn("🏠 Главное меню", "m:home")))
 
 
 # --------------------------------------------------- диалоговые состояния --
@@ -521,17 +483,17 @@ def handle_callback(q):
         text, _a, _l = wal_state()
         edit(text, msg_id, kb_wal())
     elif data == "m:etalon":
-        edit("📌 Эталон сервера %s:" % SRVNAME, msg_id, kb_etalon())
+        last = sh("bash %s/baseline.sh latest" % SCRIPTS).strip()
+        txt = "📌 Эталон сервера %s:\nПоследний: %s" % (SRVNAME, last if last else "нет — создайте первым")
+        edit(txt, msg_id, kb_etalon())
     elif data == "m:panel":
         edit("🛠 Панель X-UI и Xray — сервер %s:" % SRVNAME, msg_id, kb_panel())
     elif data == "m:ports":
         edit("🔌 Порты и файрвол — сервер %s:" % SRVNAME, msg_id, kb_ports())
     elif data == "m:logs":
         edit("📋 Логи x-ui — выбрать период (пришлю сводку + ссылку на полный отчёт):", msg_id, kb_logs())
-    elif data == "m:check":
-        edit("🌍 Внешняя проверка доступности (check-host.net, несколько стран).\nВыберите порт:", msg_id, kb_check())
-    elif data.startswith("xc:"):
-        do_external_check(data.split(":", 1)[1])
+    elif data == "xc:all":
+        do_external_check_all()
     elif data == "r:status":
         report_via_sh("status")
     elif data == "r:res":
@@ -547,12 +509,13 @@ def handle_callback(q):
     elif data == "bk:now":
         do_backup(daily=False)
     elif data == "et:save":
-        if os.path.exists(SCRIPTS + "/etalon/etalon.txt"):
-            head = sh("head -1 %s/etalon/etalon.txt | sed 's/^# Снимок: //'" % SCRIPTS)
-            set_mode("et_save_yes", 120)
-            send("⚠️ Эталон уже сохранён: %s\nПерезаписать текущим состоянием? Отправьте: yes" % head)
-        else:
-            send(sh("bash %s/baseline.sh save" % SCRIPTS) or "✅ Эталон сохранён", kb_etalon())
+        out = sh("bash %s/baseline.sh save" % SCRIPTS) or "✅ Новый эталон создан"
+        send(out, kb_etalon())
+    elif data == "et:list":
+        out = sh("bash %s/baseline.sh list" % SCRIPTS) or "Эталонов ещё нет."
+        if len(out) > 3500:
+            out = out[:3500] + "\n… (список обрезан)"
+        send(out, kb_etalon())
     elif data == "act:reboot":
         do_reboot_ask()
     elif data == "act:interval":
@@ -623,13 +586,6 @@ def handle_text(msg):
         else:
             clear_mode()
             send("Перезапуск отменён.", kb_panel())
-        return
-    if mode == "et_save_yes":
-        if text.lower() == "yes":
-            send(sh("bash %s/baseline.sh save" % SCRIPTS) or "✅ Эталон перезаписан", kb_etalon())
-        else:
-            send("Отменено — эталон не изменён.", kb_etalon())
-        clear_mode()
         return
     if mode == "logs_hours":
         if re.fullmatch(r"\d{1,4}", text) and 1 <= int(text) <= 720:
@@ -748,7 +704,7 @@ def main():
         send("🟢 Сервер %s ПЕРЕЗАГРУЖЕН (по команде из бота) и снова работает.\nАптайм: %s · Панель: %s"
              % (SRVNAME, sh("uptime -p | sed 's/up //'"), sh("systemctl is-active x-ui")))
     else:
-        send("🟢 Бот диагностики v0.2 запущен — сервер %s.\nНажмите /start для меню." % SRVNAME)
+        send("🟢 Бот диагностики v0.3.1 запущен — сервер %s.\nНажмите /start для меню." % SRVNAME)
 
     offset = 0
     next_report = time.time() + INTERVAL * 3600
